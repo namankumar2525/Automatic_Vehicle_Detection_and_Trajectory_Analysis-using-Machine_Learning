@@ -1,0 +1,349 @@
+!pip install ultralytics
+
+from IPython import display
+display.clear_output()
+
+import ultralytics
+ultralytics.checks()
+import os
+HOME = os.getcwd()
+print(HOME)
+%cd {HOME}
+from google.colab import drive
+drive.mount('/content/drive')
+
+%cd '/content/drive/My Drive/Colab Notebooks'
+!ls
+# Access the video file
+SOURCE_VIDEO_PATH = '/content/drive/MyDrive/Colab Notebooks/InputVideo 1.mp4'
+%cd {HOME}
+!git clone https://github.com/ifzhang/ByteTrack.git
+%cd {HOME}/ByteTrack
+
+# workaround related to https://github.com/roboflow/notebooks/issues/80
+!sed -i 's/onnx==1.8.1/onnx==1.9.0/g' requirements.txt
+
+!pip3 install -q -r requirements.txt
+!python3 setup.py -q develop
+!pip install -q cython_bbox
+!pip install -q onemetric
+# workaround related to https://github.com/roboflow/notebooks/issues/112 and https://github.com/roboflow/notebooks/issues/106
+!pip install -q loguru lap thop
+
+from IPython import display
+display.clear_output()
+
+
+import sys
+sys.path.append(f"{HOME}/ByteTrack")
+
+
+import yolox
+print("yolox.__version__:", yolox.__version__)
+
+from yolox.tracker.byte_tracker import BYTETracker, STrack
+from onemetric.cv.utils.iou import box_iou_batch
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class BYTETrackerArgs:
+    track_thresh: float = 0.25
+    track_buffer: int = 30
+    match_thresh: float = 0.8
+    aspect_ratio_thresh: float = 3.0
+    min_box_area: float = 1.0
+    mot20: bool = False
+
+!pip install supervision==0.1.0
+
+
+from IPython import display
+display.clear_output()
+
+
+import supervision
+print("supervision.__version__:", supervision.__version__)
+
+from supervision.draw.color import ColorPalette
+from supervision.geometry.dataclasses import Point
+from supervision.video.dataclasses import VideoInfo
+from supervision.video.source import get_video_frames_generator
+from supervision.video.sink import VideoSink
+from supervision.notebook.utils import show_frame_in_notebook
+from supervision.tools.detections import Detections, BoxAnnotator
+from supervision.tools.line_counter import LineCounter, LineCounterAnnotator
+from typing import List
+
+import numpy as np
+
+
+# converts Detections into format that can be consumed by match_detections_with_tracks function
+def detections2boxes(detections: Detections) -> np.ndarray:
+    return np.hstack((
+        detections.xyxy,
+        detections.confidence[:, np.newaxis]
+    ))
+
+
+# converts List[STrack] into format that can be consumed by match_detections_with_tracks function
+def tracks2boxes(tracks: List[STrack]) -> np.ndarray:
+    return np.array([
+        track.tlbr
+        for track
+        in tracks
+    ], dtype=float)
+
+
+# matches our bounding boxes with predictions
+def match_detections_with_tracks(
+    detections: Detections,
+    tracks: List[STrack]
+) -> Detections:
+    if not np.any(detections.xyxy) or len(tracks) == 0:
+        return np.empty((0,))
+
+    tracks_boxes = tracks2boxes(tracks=tracks)
+    iou = box_iou_batch(tracks_boxes, detections.xyxy)
+    track2detection = np.argmax(iou, axis=1)
+
+    tracker_ids = [None] * len(detections)
+
+    for tracker_index, detection_index in enumerate(track2detection):
+        if iou[tracker_index, detection_index] != 0:
+            tracker_ids[detection_index] = tracks[tracker_index].track_id
+
+    return tracker_ids
+
+# settings
+MODEL = '/content/drive/MyDrive/Colab Notebooks/best2.pt'
+
+from ultralytics import YOLO
+
+model = YOLO(MODEL)
+model.fuse()
+
+# dict maping class_id to class_name
+CLASS_NAMES_DICT = model.model.names
+# class_ids of interest - car, motorcycle, bus and truck
+CLASS_ID = [0, 1, 2, 3, 4, 5]
+
+# create frame generator
+generator = get_video_frames_generator(SOURCE_VIDEO_PATH)
+# create instance of BoxAnnotator
+box_annotator = BoxAnnotator(color=ColorPalette(), thickness=2, text_thickness=2, text_scale=1)
+
+# acquire first video frame
+iterator = iter(generator)
+frame = next(iterator)
+# model prediction on single frame and conversion to supervision Detections
+results = model(frame)
+detections = Detections(
+    xyxy=results[0].boxes.xyxy.cpu().numpy(),
+    confidence=results[0].boxes.conf.cpu().numpy(),
+    class_id=results[0].boxes.cls.cpu().numpy().astype(int)
+)
+# format custom labels
+labels = [
+    f"{CLASS_NAMES_DICT[class_id]} {confidence:0.2f}"
+    for _, confidence, class_id, tracker_id
+    in detections
+]
+# annotate and display frame
+frame = box_annotator.annotate(frame=frame, detections=detections, labels=labels)
+
+%matplotlib inline
+show_frame_in_notebook(frame, (16, 16))
+
+# settings
+LINE_START_1 = Point(808, 1142)
+LINE_END_1 = Point(1172, 2070)
+
+LINE_START_2 = Point(3360, 654)
+LINE_END_2 = Point(3092, 142)
+
+LINE_START_3 = Point(2196, 10)
+LINE_END_3 = Point(1364, 182)
+
+LINE_START_4 = Point(1508, 2154)
+LINE_END_4 = Point(2364, 2074)
+
+TARGET_VIDEO_PATH = '/content/result.mp4'
+
+VideoInfo.from_video_path(SOURCE_VIDEO_PATH)
+
+!pip install opencv-python
+import cv2
+import numpy as np
+
+from tqdm.notebook import tqdm
+import time
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
+
+# Initialize a dictionary to store object trajectories (lines)
+object_trajectories = {}
+# Create a variable to store the previous frame's timestamp
+prev_timestamp = None
+# Frame rate of the video (you may need to adjust this value)
+frame_rate = 29.97  # Adjusted frame rate to match the video's frame rate
+# Conversion factor from pixels to meters
+pixels_to_meters = 0.12  # 1 pixel ≈ 0.054 meters
+# Conversion factor from meters per second to kilometers per hour
+mps_to_kmph = 3.6
+# Define the moving average window size
+speed_window_size = 30  # Adjust this value as needed
+# Initialize an empty dictionary to store previous speed values
+speed_history = {}
+# Smoothing parameters
+smoothing_window_size = 10  # Adjust this value for desired smoothing
+
+# create BYTETracker instance
+byte_tracker = BYTETracker(BYTETrackerArgs())
+# create VideoInfo instance
+video_info = VideoInfo.from_video_path(SOURCE_VIDEO_PATH)
+# create frame generator
+generator = get_video_frames_generator(SOURCE_VIDEO_PATH)
+# create LineCounter instance
+line_counter_1 = LineCounter(start=LINE_START_1, end=LINE_END_1)
+line_counter_2 = LineCounter(start=LINE_START_2, end=LINE_END_2)
+line_counter_3 = LineCounter(start=LINE_START_3, end=LINE_END_3)
+line_counter_4 = LineCounter(start=LINE_START_4, end=LINE_END_4)
+# create instance of BoxAnnotator and LineCounterAnnotator
+box_annotator = BoxAnnotator(color=ColorPalette(), thickness=2, text_thickness=2, text_scale=1)
+line_annotator = LineCounterAnnotator(thickness=2, text_thickness=2, text_scale=1)
+
+# open target video file
+with VideoSink(TARGET_VIDEO_PATH, video_info) as sink:
+    for frame in tqdm(generator, total=video_info.total_frames):
+        current_timestamp = time.time()
+        if prev_timestamp is not None:
+            time_elapsed = current_timestamp - prev_timestamp
+        else:
+            time_elapsed = 0.0
+        prev_timestamp = current_timestamp
+
+        # model prediction on a single frame and conversion to supervision Detections
+        results = model(frame)
+        detections = Detections(
+            xyxy=results[0].boxes.xyxy.cpu().numpy(),
+            confidence=results[0].boxes.conf.cpu().numpy(),
+            class_id=results[0].boxes.cls.cpu().numpy().astype(int)
+        )
+        mask = np.array([class_id in CLASS_ID for class_id in detections.class_id], dtype=bool)
+        detections.filter(mask=mask, inplace=True)
+        tracks = byte_tracker.update(
+            output_results=detections2boxes(detections=detections),
+            img_info=frame.shape,
+            img_size=frame.shape
+        )
+        tracker_id = match_detections_with_tracks(detections=detections, tracks=tracks)
+        detections.tracker_id = np.array(tracker_id)
+        mask = np.array([tracker_id is not None for tracker_id in detections.tracker_id], dtype=bool)
+        detections.filter(mask=mask, inplace=True)
+
+        # Calculate and update the speed information for each tracked object
+        for track in tracks:
+            if track.track_id in object_trajectories:
+                centroid_trajectory = object_trajectories[track.track_id]
+                x_center = int((track.tlbr[0] + track.tlbr[2]) / 2)
+                y_center = int((track.tlbr[1] + track.tlbr[3]) / 2)
+                centroid_trajectory.append((x_center, y_center))
+                object_trajectories[track.track_id] = centroid_trajectory
+                # Calculate the distance between consecutive centroids in pixels
+                if len(centroid_trajectory) >= 2:
+                    prev_x, prev_y = centroid_trajectory[-2]
+                    curr_x, curr_y = centroid_trajectory[-1]
+                    distance_pixels = np.sqrt((curr_x - prev_x) ** 2 + (curr_y - prev_y) ** 2)
+                    # Calculate speed in m/s and then convert to km/h
+                    speed_mps = distance_pixels * pixels_to_meters / time_elapsed
+                    speed_kmph = int(round(speed_mps * mps_to_kmph))
+                else:
+                    speed_kmph = 0
+
+            else:
+                speed_kmph = 0
+
+            # Append the current speed to the speed history dictionary
+            if track.track_id not in speed_history:
+                speed_history[track.track_id] = []
+            speed_history[track.track_id].append(speed_kmph)
+
+        # Apply smoothing to speed values
+        for track_id, speeds in speed_history.items():
+            if len(speeds) >= smoothing_window_size:
+                smoothed_speeds = np.convolve(speeds, np.ones(smoothing_window_size)/smoothing_window_size, mode='valid')
+                speed_history[track_id] = smoothed_speeds.tolist()  # Convert back to a Python list
+
+        # Format custom labels with speed information
+        labels = [
+            f"#{tracker_id} {CLASS_NAMES_DICT[class_id]} {confidence:0.2f} {speed_history[tracker_id][-1]:.2f}km/h"
+            for _, confidence, class_id, tracker_id
+            in detections
+        ]
+
+        # Draw trace lines for tracked objects
+        for track in tracks:
+            if track.track_id in object_trajectories:
+                # Retrieve the centroid trajectory of the object
+                centroid_trajectory = object_trajectories[track.track_id]
+                # Draw lines connecting the object's previous centroid positions
+                for i in range(1, len(centroid_trajectory)):
+                    cv2.line(frame, centroid_trajectory[i - 1], centroid_trajectory[i], (0, 255, 0), 2)
+            else:
+                # If the object is not in the dictionary, create a new trajectory
+                centroid_trajectory = []
+
+            # Calculate the centroid of the bounding box
+            x_center = int((track.tlbr[0] + track.tlbr[2]) / 2)
+            y_center = int((track.tlbr[1] + track.tlbr[3]) / 2)
+
+            # Update the object's trajectory with the current position
+            centroid_trajectory.append((x_center, y_center))
+            object_trajectories[track.track_id] = centroid_trajectory
+
+        # updating line counter
+        line_counter_1.update(detections=detections)
+        line_counter_2.update(detections=detections)
+        line_counter_3.update(detections=detections)
+        line_counter_4.update(detections=detections)
+
+        # Count the total number of objects detected and tracked
+        total_objects_detected = len(detections)
+
+        # Count the classified objects by class
+        class_counters = {class_id: np.sum(detections.class_id == class_id) for class_id in CLASS_ID}
+
+        # Create text to display counts on the frame
+        count_text = f"\nTotal: {total_objects_detected}\n"
+        count_text += "\n".join([f"{CLASS_NAMES_DICT[class_id]}: {count}" for class_id, count in class_counters.items()])
+
+        # annotate and display frame
+        frame = box_annotator.annotate(frame=frame, detections=detections, labels=labels)
+        line_annotator.annotate(frame=frame, line_counter=line_counter_1)
+        line_annotator.annotate(frame=frame, line_counter=line_counter_2)
+        line_annotator.annotate(frame=frame, line_counter=line_counter_3)
+        line_annotator.annotate(frame=frame, line_counter=line_counter_4)
+
+        # Add the count text to the frame
+        for i, line in enumerate(count_text.split('\n')):
+            cv2.putText(frame, line, (10, 10 + i * 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+
+        # Write the frame to the output video
+        sink.write_frame(frame)
+
+# Video processing completed
+print("Video processing completed.")
+
+# Plot the speed variation profile of tracked vehicles
+plt.figure(figsize=(12, 6))
+
+for track_id, speeds in speed_history.items():
+    plt.plot(range(len(speeds)), speeds, label=f'Tracked Object {track_id}')
+
+plt.xlabel('Frame Number')
+plt.ylabel('Speed (km/h)')
+plt.title('Speed Variation Profile of Tracked Vehicles')
+plt.legend()
+plt.show()
