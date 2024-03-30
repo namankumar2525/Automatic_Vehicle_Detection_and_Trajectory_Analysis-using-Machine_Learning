@@ -1,5 +1,1 @@
 # Automatic_Vehicle_Detection_and_Trajectory_Analysis-using-Machine_Learning
-# Implemented Machine Learning and Artificial Intelligence for automated vehicle detection and trajectory analysis
-# Performed Image Analysis using OpenCV
-# Utilised Various Python Libraries like OpenCV, Matplotlib, Numpy, Pandas, 
-# Utilized YOLO framework and advanced algorithms to automate vehicle detection and trajectory analysis, enhancing efficiency and accuracy in real-time monitoring
